@@ -1,0 +1,260 @@
+pragma solidity ^0.4.16;
+
+// Original code taken from: https://www.ethereum.org/dao (Congress)
+// Token address: 0xf38a0cC324304F3f8c7778e1F425107192520c7a
+
+contract owned {
+    address public owner;
+
+    constructor() public {
+        owner = msg.sender;
+    }
+
+    modifier onlyOwner {
+        require(msg.sender == owner);
+        _;
+    }
+}
+
+
+//-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+contract tokenRecipient {
+    event receivedEther(address sender, uint amount);
+    //event receivedTokens(address _from, uint256 _value, address _token, bytes _extraData);
+
+    //function receiveApproval(address _from, uint256 _value, address _token, bytes _extraData) public {
+    //    emit receivedTokens(_from, _value, _token, _extraData);
+    //}
+
+    function () payable public {
+        emit receivedEther(msg.sender, msg.value);
+    }
+}
+//-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+
+contract Token {
+    mapping (address => uint256) public balanceOf;
+}
+
+contract Democracy is owned, tokenRecipient {
+    // Contract Variables and events
+    uint public minimumQuorum;
+    uint public debatingPeriodInMinutes;
+    Proposal[] public proposals;
+    Delegation[] public delegations;
+    uint public numProposals;
+    Token public sharesTokenAddress;
+
+    event ProposalAdded(uint proposalID, address recipient, uint amount, string description);
+    event Voted(uint proposalID, bool position, address voter, string justification);
+    event DelegatedVote(uint proposalID, address voter, address delegateTo, uint numberOfVotes, string justification);
+    event ProposalTallied(uint proposalID, uint result, uint quorum, bool active);
+    event SettingRules(uint newMinimumQuorum, uint newDebatingPeriodInMinutes, address newSharesTokenAddress);
+
+    struct Proposal {
+        address recipient;
+        uint amount;
+        string description;
+        uint minExecutionDate;
+        bool executed;
+        bool proposalPassed;
+        uint numberOfVotes;
+        int currentResult;
+        uint currentCountYea;
+        uint currentCountNay;
+        Vote[] votes;
+        Delegation[] delegations;
+        mapping (address => bool) voted;
+    }
+
+    struct Vote {
+        bool inSupport;
+        address voter;
+        string justification;
+    }
+
+    struct Delegation {
+        address voter;
+        address delegatedTo;
+        uint numberOfVotes;
+        string justification;
+    //    Vote[] votes;
+    //    Delegation[] delegations;
+    //    mapping (address => bool) voted;
+	}
+	
+    // Modifier that allows only shareholders to vote and create new proposals
+    modifier onlyShareholders {
+        require(sharesTokenAddress.balanceOf(msg.sender) > 0);
+        _;
+    }
+
+    /**
+     * Constructor function
+	 *
+     * First time setup
+	 */
+    constructor(
+		Token voteTokenAddress,
+        uint minimumQuorumForProposalToExecute,
+		uint minimumTokensToPassAVote,
+        uint minutesBeforeExecutingProposal
+    ) payable public {
+		sharesTokenAddress = Token(voteTokenAddress);
+		if (minimumTokensToPassAVote == 0 ) minimumTokensToPassAVote = 1;
+		minimumQuorum = minimumQuorumForProposalToExecute;
+        debatingPeriodInMinutes = minutesBeforeExecutingProposal;
+        emit SettingRules(minimumQuorum, debatingPeriodInMinutes, sharesTokenAddress);
+    }
+
+    /**
+     * Add Proposal
+     *
+     * @param ethAmountStaked amount of ether to send, in wei
+     * @param jobDescription Description of job
+     */
+    function newProposal(
+        uint ethAmountStaked,
+        string jobDescription
+    )
+        onlyShareholders public
+        returns (uint proposalID)
+    {
+        proposalID = proposals.length++;
+        Proposal storage p = proposals[proposalID];
+        p.recipient = msg.sender;
+        p.amount = ethAmountStaked * 1 ether;
+        p.description = jobDescription;
+        p.minExecutionDate = now + debatingPeriodInMinutes * 1 minutes; 				//in minutes, can be changedd to hours, days...
+        p.executed = false;
+        p.proposalPassed = false;
+        p.numberOfVotes = 0;
+        emit ProposalAdded(proposalID, msg.sender, ethAmountStaked, jobDescription);
+        numProposals = proposalID+1;
+
+        return proposalID;
+    }
+
+    /**
+     * Log a vote for a proposal
+     *
+     * Vote `supportsProposal? in support of : against` proposal #`proposalNumber`
+     *
+     * @param proposalNumber number of proposal
+     * @param supportsProposal either in favor or against it
+     * @param justificationText optional justification text
+     */
+    function vote(
+        uint proposalNumber,
+        bool supportsProposal,
+		uint voteWeight,
+        string justificationText
+    )
+        onlyShareholders public
+        returns (uint voteID)
+    {
+        Proposal storage p = proposals[proposalNumber]; // Get the proposal
+		require(
+			p.executed != true 			// Cannot vote on an already executed proposal
+			&& voteWeight <= 10			// Vote weight is max 10
+			&& !p.voted[msg.sender]		// Cannot have already voted
+			);
+		
+        p.voted[msg.sender] = true;                     // Set this voter as having voted
+        p.numberOfVotes++;                              // Increase the number of votes
+
+        if (supportsProposal) {                         // If they support the proposal
+            p.currentResult += int(voteWeight);         // Increase score by weight
+			p.currentCountYea ++;
+        } else {                                        // If they don't
+            p.currentResult -= int(voteWeight);         // Decrease the score
+			p.currentCountNay ++;
+        }
+
+        // Create a log of this event
+        emit Voted(proposalNumber, supportsProposal, msg.sender, justificationText);
+        return p.numberOfVotes;
+		
+		// After each vote, execute the proposal if all the conditions have been met
+		//if (now > p.minExecutionDate && p.numberOfVotes >= minimumQuorum) {
+		//	executeProposal(proposalNumber); //Doesn't work somehow... :-(
+		//}
+    }
+	
+    /**
+     * Delegate a vote for a proposal
+     *
+     * @param proposalNumber number of proposal
+     * @param justificationText optional justification text
+     */
+    function delegateVote(
+        uint proposalNumber,
+		address delegateTo,
+		uint voteWeight,
+        string justificationText
+    )
+        onlyShareholders public
+        returns (uint delegationID)
+    {
+        Proposal storage p = proposals[proposalNumber]; // Get the proposal
+		require(
+			p.executed != true 			// Cannot vote on an already executed proposal
+			&& voteWeight <= 10			// Vote weight is max 10
+			&& !p.voted[msg.sender]		// Cannot have already voted
+			&& msg.sender != delegateTo	// Cannot delegate a vote to oneself!
+			);
+		
+		
+		
+        delegationID = delegations.length++;
+        Delegation storage d = delegations[delegationID];
+		d.voter = msg.sender;
+		d.delegatedTo = delegateTo;
+		d.numberOfVotes = voteWeight;
+		d.justification = justificationText;
+		
+		
+		
+        p.voted[msg.sender] = true;                     // Set this voter as having voted
+        p.numberOfVotes++;                              // Increase the number of votes as
+
+        // Create a log of this event
+        emit DelegatedVote(proposalNumber, msg.sender, delegateTo, voteWeight, justificationText);
+		
+		// After each vote, execute the proposal if all the conditions have been met
+		//if (now > p.minExecutionDate && p.numberOfVotes >= minimumQuorum) {
+		//	executeProposal(proposalNumber); //Doesn't work somehow... :-(
+		//}
+    }
+	
+	
+	
+    /**
+     * Finish vote
+     *
+     * Count the votes proposal #`proposalNumber` and execute it if approved
+     *
+     * @param proposalNumber proposal number
+     */
+    function executeProposal(uint proposalNumber) public {
+        Proposal storage p = proposals[proposalNumber];
+
+        require(
+			now > p.minExecutionDate                       		// If it is past the voting deadline
+            && !p.executed                               	    // and it has not already been executed
+            && p.numberOfVotes >= minimumQuorum);               // and a minimum quorum has been reached...
+
+        // ...then execute result
+        p.executed = true; 										// Avoid recursive calling
+		
+		// pass the proposal if current results over 0 (= more weight on passing proposal) AND more Yea than Nay!
+		if (p.currentResult >= 0 && p.currentCountYea > p.currentCountNay) {
+			require(p.recipient.call.value(p.amount)()); 		//this sends the eth to the account who made the proposal
+            p.proposalPassed = true;
+        } else {
+            p.proposalPassed = false; 							// Proposal failed
+        }
+		emit ProposalTallied(proposalNumber, uint(p.currentResult), p.numberOfVotes, p.proposalPassed);		// Fire Events
+    }
+}
